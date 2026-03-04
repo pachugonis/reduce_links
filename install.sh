@@ -157,16 +157,25 @@ reset_mysql_password() {
         return 1
     fi
     
-    # Сбрасываем пароль root (разные команды для MySQL 5.7 и 8.0+)
+    # Сбрасываем пароль root напрямую в таблице пользователей
+    # В режиме skip-grant-tables можно только обновлять таблицы напрямую
+    
+    # Для MySQL 8.0+ используем caching_sha2_password с хешем
+    # Для MySQL 5.7 используем mysql_native_password
+    
+    # Пробуем разные методы обновления пароля
+    mysql -u root mysql << EOF 2>/dev/null || true
+UPDATE user SET authentication_string='', plugin='mysql_native_password' WHERE User='root';
+FLUSH PRIVILEGES;
+EOF
+
+    # Альтернативный метод для старых версий
+    mysql -u root mysql -e "UPDATE user SET password='' WHERE User='root';" 2>/dev/null || true
+    
+    # Перезагружаем привилегии
     mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
     
-    # Пробуем разные варианты сброса пароля
-    mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${NEW_PASS}';" 2>/dev/null || \
-    mysql -u root -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${NEW_PASS}');" 2>/dev/null || \
-    mysql -u root -e "UPDATE mysql.user SET authentication_string=PASSWORD('${NEW_PASS}') WHERE User='root';" 2>/dev/null || \
-    mysql -u root -e "UPDATE mysql.user SET password=PASSWORD('${NEW_PASS}') WHERE User='root';" 2>/dev/null
-    
-    mysql -u root -e "FLUSH PRIVILEGES;"
+    print_info "Пароль root сброшен (пустой пароль)"
     
     # Останавливаем MySQL в режиме восстановления
     pkill -9 mysqld 2>/dev/null || true
@@ -177,11 +186,18 @@ reset_mysql_password() {
     systemctl start mysql
     sleep 5
     
-    # Проверяем подключение с новым паролем
+    # Проверяем подключение с пустым паролем
     local check_attempts=0
     while [ $check_attempts -lt 10 ]; do
-        if mysql -u root -p"${NEW_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-            return 0
+        if mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
+            # Устанавливаем новый пароль
+            mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${NEW_PASS}';" 2>/dev/null || \
+            mysql -u root -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${NEW_PASS}');" 2>/dev/null || true
+            
+            # Проверяем что пароль установлен
+            if mysql -u root -p"${NEW_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+                return 0
+            fi
         fi
         sleep 1
         check_attempts=$((check_attempts + 1))
