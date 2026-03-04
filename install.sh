@@ -119,7 +119,71 @@ systemctl start mysql
 systemctl enable mysql
 
 # Ожидание полного запуска MySQL
-sleep 2
+sleep 3
+
+# Функция для сброса пароля MySQL через skip-grant-tables
+reset_mysql_password() {
+    local NEW_PASS="$1"
+    
+    print_info "Сброс пароля MySQL через режим восстановления..."
+    
+    # Останавливаем MySQL полностью
+    systemctl stop mysql
+    sleep 2
+    pkill -9 mysqld 2>/dev/null || true
+    sleep 1
+    
+    # Создаем директорию для запуска mysqld_safe
+    mkdir -p /var/run/mysqld
+    chown mysql:mysql /var/run/mysqld
+    
+    # Запускаем MySQL в фоне с skip-grant-tables
+    mysqld_safe --skip-grant-tables --skip-networking &
+    
+    # Ждем запуска
+    sleep 5
+    
+    # Проверяем подключение без пароля
+    local attempts=0
+    while [ $attempts -lt 10 ]; do
+        if mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    
+    if ! mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
+        print_error "Не удалось подключиться к MySQL в режиме восстановления"
+        return 1
+    fi
+    
+    # Сбрасываем пароль root (разные команды для MySQL 5.7 и 8.0+)
+    mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null
+    
+    # Пробуем MySQL 8.0+ синтаксис
+    mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${NEW_PASS}';" 2>/dev/null || \
+    mysql -u root -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${NEW_PASS}');" 2>/dev/null || \
+    mysql -u root -e "UPDATE mysql.user SET authentication_string=PASSWORD('${NEW_PASS}') WHERE User='root';" 2>/dev/null || \
+    mysql -u root -e "UPDATE mysql.user SET password=PASSWORD('${NEW_PASS}') WHERE User='root';" 2>/dev/null
+    
+    mysql -u root -e "FLUSH PRIVILEGES;"
+    
+    # Останавливаем MySQL в режиме восстановления
+    pkill -9 mysqld 2>/dev/null || true
+    sleep 2
+    
+    # Запускаем MySQL нормально
+    systemctl start mysql
+    sleep 3
+    
+    # Проверяем подключение с новым паролем
+    if mysql -u root -p"${NEW_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
 
 # Попытка подключения без пароля (socket auth) или с пустым паролем
 if mysql -e "SELECT 1;" > /dev/null 2>&1; then
@@ -139,46 +203,14 @@ else
         MYSQL_CMD="mysql -u root -p${TEMP_PASS}"
         print_info "Найден и использован временный пароль MySQL"
     else
-        # Пробуем сбросить пароль через init-file
-        print_info "Попытка автоматической настройки пароля root..."
-        
-        # Останавливаем MySQL
-        systemctl stop mysql
-        
-        # Создаем init-file для сброса пароля
-        INIT_FILE="/tmp/mysql-init.sql"
-        echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';" > "$INIT_FILE"
-        echo "FLUSH PRIVILEGES;" >> "$INIT_FILE"
-        
-        # Запускаем MySQL с init-file
-        mysqld --init-file="$INIT_FILE" --daemonize --skip-grant-tables=0 2>/dev/null || true
-        
-        # Ждем запуска
-        sleep 3
-        
-        # Проверяем подключение с новым паролем
-        if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+        # Сбрасываем пароль принудительно
+        if reset_mysql_password "${DB_ROOT_PASS}"; then
             MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
             print_success "Пароль root MySQL успешно сброшен"
         else
-            # Перезапускаем MySQL нормально
-            pkill mysqld 2>/dev/null || true
-            sleep 1
-            systemctl start mysql
-            sleep 2
-            
-            # Проверяем еще раз
-            if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-                MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
-                print_success "Пароль root MySQL настроен"
-            else
-                print_error "Не удалось автоматически настроить пароль MySQL"
-                exit 1
-            fi
+            print_error "Не удалось автоматически настроить пароль MySQL"
+            exit 1
         fi
-        
-        # Удаляем init-file
-        rm -f "$INIT_FILE"
     fi
 fi
 
