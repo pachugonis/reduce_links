@@ -1,0 +1,16 @@
+RewriteEngine On
+RewriteBase /
+
+# Serve static files directly
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# Serve assets directory
+RewriteCond %{REQUEST_URI} ^/assets/
+RewriteRule ^ - [L]
+
+# Route slug requests to redirect.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} !^/index\.php
+RewriteRule ^([a-zA-Z0-9\-]+)$ redirect.php?slug=$1 [L,QSA]
