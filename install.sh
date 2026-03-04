@@ -128,25 +128,24 @@ reset_mysql_password() {
     print_info "Сброс пароля MySQL через режим восстановления..."
     
     # Останавливаем MySQL полностью
-    systemctl stop mysql
+    systemctl stop mysql 2>/dev/null || true
     sleep 2
     pkill -9 mysqld 2>/dev/null || true
-    sleep 1
+    pkill -9 mysqld_safe 2>/dev/null || true
+    sleep 2
     
     # Создаем директорию для запуска mysqld_safe
     mkdir -p /var/run/mysqld
-    chown mysql:mysql /var/run/mysqld
+    chown mysql:mysql /var/run/mysqld 2>/dev/null || true
     
     # Запускаем MySQL в фоне с skip-grant-tables
-    mysqld_safe --skip-grant-tables --skip-networking &
+    nohup mysqld_safe --skip-grant-tables --skip-networking > /dev/null 2>&1 &
     
-    # Ждем запуска
-    sleep 5
-    
-    # Проверяем подключение без пароля
+    # Ждем запуска с проверкой
     local attempts=0
-    while [ $attempts -lt 10 ]; do
+    while [ $attempts -lt 30 ]; do
         if mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
+            print_info "MySQL запущен в режиме восстановления"
             break
         fi
         sleep 1
@@ -159,9 +158,9 @@ reset_mysql_password() {
     fi
     
     # Сбрасываем пароль root (разные команды для MySQL 5.7 и 8.0+)
-    mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null
+    mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
     
-    # Пробуем MySQL 8.0+ синтаксис
+    # Пробуем разные варианты сброса пароля
     mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${NEW_PASS}';" 2>/dev/null || \
     mysql -u root -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${NEW_PASS}');" 2>/dev/null || \
     mysql -u root -e "UPDATE mysql.user SET authentication_string=PASSWORD('${NEW_PASS}') WHERE User='root';" 2>/dev/null || \
@@ -171,46 +170,62 @@ reset_mysql_password() {
     
     # Останавливаем MySQL в режиме восстановления
     pkill -9 mysqld 2>/dev/null || true
-    sleep 2
+    pkill -9 mysqld_safe 2>/dev/null || true
+    sleep 3
     
     # Запускаем MySQL нормально
     systemctl start mysql
-    sleep 3
+    sleep 5
     
     # Проверяем подключение с новым паролем
-    if mysql -u root -p"${NEW_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
+    local check_attempts=0
+    while [ $check_attempts -lt 10 ]; do
+        if mysql -u root -p"${NEW_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        check_attempts=$((check_attempts + 1))
+    done
+    
+    return 1
 }
 
-# Попытка подключения без пароля (socket auth) или с пустым паролем
+# Проверяем возможность подключения к MySQL
+MYSQL_CONNECTED=false
+
+# Попытка 1: Подключение без пароля (socket auth)
 if mysql -e "SELECT 1;" > /dev/null 2>&1; then
-    # Подключение без пароля работает
     MYSQL_CMD="mysql"
+    MYSQL_CONNECTED=true
     print_info "Подключение к MySQL без пароля (socket auth)"
-elif mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
-    # Подключение как root без пароля
+fi
+
+# Попытка 2: Подключение как root без пароля
+if [ "$MYSQL_CONNECTED" = false ] && mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
     MYSQL_CMD="mysql -u root"
+    MYSQL_CONNECTED=true
     print_info "Подключение к MySQL как root без пароля"
-else
-    # Пробуем найти временный пароль в логах (для свежей установки MySQL 8.0+)
+fi
+
+# Попытка 3: Поиск временного пароля в логах (MySQL 8.0+)
+if [ "$MYSQL_CONNECTED" = false ]; then
     TEMP_PASS=$(grep 'temporary password' /var/log/mysql/error.log 2>/dev/null | tail -1 | sed 's/.*temporary password is "\([^"]*\)".*/\1/')
-    
     if [ -n "$TEMP_PASS" ] && mysql -u root -p"${TEMP_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-        # Используем временный пароль
         MYSQL_CMD="mysql -u root -p${TEMP_PASS}"
+        MYSQL_CONNECTED=true
         print_info "Найден и использован временный пароль MySQL"
+    fi
+fi
+
+# Попытка 4: Сброс пароля принудительно
+if [ "$MYSQL_CONNECTED" = false ]; then
+    if reset_mysql_password "${DB_ROOT_PASS}"; then
+        MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
+        MYSQL_CONNECTED=true
+        print_success "Пароль root MySQL успешно сброшен"
     else
-        # Сбрасываем пароль принудительно
-        if reset_mysql_password "${DB_ROOT_PASS}"; then
-            MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
-            print_success "Пароль root MySQL успешно сброшен"
-        else
-            print_error "Не удалось автоматически настроить пароль MySQL"
-            exit 1
-        fi
+        print_error "Не удалось автоматически настроить пароль MySQL"
+        exit 1
     fi
 fi
 
