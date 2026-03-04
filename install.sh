@@ -118,18 +118,86 @@ print_info "Настройка MySQL..."
 systemctl start mysql
 systemctl enable mysql
 
+# Ожидание полного запуска MySQL
+sleep 2
+
+# Попытка подключения без пароля (socket auth) или с пустым паролем
+if mysql -e "SELECT 1;" > /dev/null 2>&1; then
+    # Подключение без пароля работает
+    MYSQL_CMD="mysql"
+    print_info "Подключение к MySQL без пароля (socket auth)"
+elif mysql -u root -e "SELECT 1;" > /dev/null 2>&1; then
+    # Подключение как root без пароля
+    MYSQL_CMD="mysql -u root"
+    print_info "Подключение к MySQL как root без пароля"
+else
+    # Пробуем найти временный пароль в логах (для свежей установки MySQL 8.0+)
+    TEMP_PASS=$(grep 'temporary password' /var/log/mysql/error.log 2>/dev/null | tail -1 | sed 's/.*temporary password is "\([^"]*\)".*/\1/')
+    
+    if [ -n "$TEMP_PASS" ] && mysql -u root -p"${TEMP_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+        # Используем временный пароль
+        MYSQL_CMD="mysql -u root -p${TEMP_PASS}"
+        print_info "Найден и использован временный пароль MySQL"
+    else
+        # Пробуем сбросить пароль через init-file
+        print_info "Попытка автоматической настройки пароля root..."
+        
+        # Останавливаем MySQL
+        systemctl stop mysql
+        
+        # Создаем init-file для сброса пароля
+        INIT_FILE="/tmp/mysql-init.sql"
+        echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';" > "$INIT_FILE"
+        echo "FLUSH PRIVILEGES;" >> "$INIT_FILE"
+        
+        # Запускаем MySQL с init-file
+        mysqld --init-file="$INIT_FILE" --daemonize --skip-grant-tables=0 2>/dev/null || true
+        
+        # Ждем запуска
+        sleep 3
+        
+        # Проверяем подключение с новым паролем
+        if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+            MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
+            print_success "Пароль root MySQL успешно сброшен"
+        else
+            # Перезапускаем MySQL нормально
+            pkill mysqld 2>/dev/null || true
+            sleep 1
+            systemctl start mysql
+            sleep 2
+            
+            # Проверяем еще раз
+            if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
+                MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
+                print_success "Пароль root MySQL настроен"
+            else
+                print_error "Не удалось автоматически настроить пароль MySQL"
+                exit 1
+            fi
+        fi
+        
+        # Удаляем init-file
+        rm -f "$INIT_FILE"
+    fi
+fi
+
 # Настройка безопасности MySQL
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';"
-mysql -e "DELETE FROM mysql.user WHERE User='';"
-mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-mysql -e "DROP DATABASE IF EXISTS test;"
-mysql -e "FLUSH PRIVILEGES;"
+${MYSQL_CMD} -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';" 2>/dev/null || true
+
+# После установки пароля используем его для дальнейших команд
+MYSQL_CMD="mysql -u root -p${DB_ROOT_PASS}"
+
+${MYSQL_CMD} -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+${MYSQL_CMD} -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" 2>/dev/null || true
+${MYSQL_CMD} -e "DROP DATABASE IF EXISTS test;" 2>/dev/null || true
+${MYSQL_CMD} -e "FLUSH PRIVILEGES;"
 
 # Создание базы данных и пользователя
-mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
-mysql -u root -p"${DB_ROOT_PASS}" -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
-mysql -u root -p"${DB_ROOT_PASS}" -e "FLUSH PRIVILEGES;"
+${MYSQL_CMD} -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+${MYSQL_CMD} -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+${MYSQL_CMD} -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
+${MYSQL_CMD} -e "FLUSH PRIVILEGES;"
 
 print_success "MySQL настроен"
 
