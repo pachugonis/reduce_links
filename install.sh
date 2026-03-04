@@ -385,6 +385,10 @@ EOF
 a2dissite 000-default.conf 2>/dev/null || true
 a2ensite reduce_links.conf
 
+# Настройка прав доступа для assets
+chown -R www-data:www-data "${INSTALL_DIR}/public/assets"
+chmod -R 755 "${INSTALL_DIR}/public/assets"
+
 # Перезапуск Apache
 systemctl restart apache2
 systemctl enable apache2
